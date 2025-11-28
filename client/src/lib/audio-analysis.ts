@@ -117,9 +117,10 @@ const detectTempo = (data: Float32Array, sampleRate: number) => {
   // Convert to BPM
   let bpm = 60 / medianInterval;
   
-  // Snap to reasonable tempo range
-  while (bpm < 60) bpm *= 2;
-  while (bpm > 200) bpm /= 2;
+  // Snap to reasonable tempo range (prefer 75-150 for most drum loops)
+  // If it's extremely fast (>160), it's likely double time
+  while (bpm < 75) bpm *= 2;
+  while (bpm > 160) bpm /= 2;
   
   return bpm;
 };
@@ -128,25 +129,36 @@ const detectOnsets = (data: Float32Array, sampleRate: number, totalSteps: number
   const stepSize = Math.floor(data.length / totalSteps);
   const onsets = [];
   
+  // Calculate global RMS to set dynamic thresholds
+  let sumSquares = 0;
+  for (let i = 0; i < data.length; i++) {
+    sumSquares += data[i] * data[i];
+  }
+  const globalRMS = Math.sqrt(sumSquares / data.length);
+  const dynamicThreshold = Math.max(0.02, globalRMS * 0.5);
+
   for (let step = 0; step < totalSteps; step++) {
     const start = step * stepSize;
     const end = Math.min(start + stepSize, data.length);
-    const windowSize = Math.min(512, end - start);
+    // Look slightly outside the window to catch swing/late hits? 
+    // No, strict quantization means we just look in the grid slot.
     
-    // Calculate energy and spectral flux in this window
     let energy = 0;
     let peakValue = 0;
     
-    for (let i = start; i < start + windowSize && i < end; i++) {
+    for (let i = start; i < end; i++) {
       const val = Math.abs(data[i]);
       energy += val * val;
       peakValue = Math.max(peakValue, val);
     }
     
-    energy = Math.sqrt(energy / windowSize);
+    energy = Math.sqrt(energy / (end - start));
     
-    // An onset is a combination of high energy and a sharp transient
-    const hasOnset = energy > 0.02 || peakValue > 0.1;
+    // Stricter onset detection:
+    // 1. Energy must be significant relative to global level
+    // 2. Peak must be sharp
+    const hasOnset = energy > dynamicThreshold || peakValue > (globalRMS * 1.5);
+    
     onsets.push({ step, energy, peakValue, hasOnset });
   }
   
