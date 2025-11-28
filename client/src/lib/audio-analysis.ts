@@ -222,26 +222,44 @@ const classifyHiHats = (data: Float32Array, sampleRate: number, onsets: any[], t
 };
 
 const patternToString = (pattern: boolean[], sound: string) => {
-  return pattern.map(hit => hit ? sound : '~').join(' ');
+  // Group into beats (8 steps per beat for 32nd notes)
+  const stepsPerBeat = 8;
+  const beats = [];
+  
+  for (let i = 0; i < pattern.length; i += stepsPerBeat) {
+    const beatSteps = pattern.slice(i, i + stepsPerBeat);
+    const beatStr = beatSteps.map(hit => hit ? sound : '~').join(' ');
+    beats.push(beatStr);
+  }
+  
+  return beats;
 };
 
 const generateDrumCode = (kicks: boolean[], snares: boolean[], hihats: boolean[], bpm: number, beats: number) => {
-  // Create mini-notation for each instrument
-  // We use 32nd note resolution, so the patterns are quite dense
-  const kickStr = patternToString(kicks, 'bd');
-  const snareStr = patternToString(snares, 'sd');
-  const hihatStr = patternToString(hihats, 'hh');
+  const kickBeats = patternToString(kicks, 'bd');
+  const snareBeats = patternToString(snares, 'sd');
+  const hihatBeats = patternToString(hihats, 'hh');
   
   let code = `// ${beats} beat drum loop @ ${Math.round(bpm)} BPM\n`;
   code += `// 32nd note quantization\n\n`;
   
-  // We use .slow(beats) because Strudel fits the whole pattern into 1 cycle by default.
-  // By slowing it down by the number of beats, we ensure 1 cycle = 1 beat,
-  // which matches the standard cpm(bpm) expectation.
   code += `stack(\n`;
-  code += `  s("${kickStr}"),\n`;
-  code += `  s("${snareStr}"),\n`;
-  code += `  s("${hihatStr}")\n`;
+  
+  const buildInstrumentTrack = (beatArray: string[]) => {
+    let track = `  s(\`\n`;
+    // Group into bars (4 beats per bar)
+    for (let i = 0; i < beatArray.length; i += 4) {
+      const barBeats = beatArray.slice(i, i + 4);
+      track += `    ${barBeats.join('  ')}\n`;
+    }
+    track += `  \`)`;
+    return track;
+  };
+
+  code += `${buildInstrumentTrack(kickBeats)},\n`;
+  code += `${buildInstrumentTrack(snareBeats)},\n`;
+  code += `${buildInstrumentTrack(hihatBeats)}\n`;
+  
   code += `).slow(${beats}).cpm(${Math.round(bpm)})`;
   
   return code;
