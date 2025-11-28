@@ -1,0 +1,479 @@
+import React, { useState, useRef, useEffect } from 'react';
+import { Upload, Play, Square, Copy, Check, Music2, Zap, AlertCircle } from 'lucide-react';
+
+export default function DrumToStrudel() {
+  const [audioFile, setAudioFile] = useState(null);
+  const [audioUrl, setAudioUrl] = useState(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [strudelCode, setStrudelCode] = useState('');
+  const [drumPattern, setDrumPattern] = useState(null);
+  const [playing, setPlaying] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState(null);
+  const audioRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      if (audioUrl) URL.revokeObjectURL(audioUrl);
+    };
+  }, [audioUrl]);
+
+  const handleFileUpload = (e) => {
+    const file = e.target.files[0];
+    if (file && file.type.startsWith('audio/')) {
+      setAudioFile(file);
+      const url = URL.createObjectURL(file);
+      setAudioUrl(url);
+      setStrudelCode('');
+      setDrumPattern(null);
+      setError(null);
+    }
+  };
+
+  const analyzeDrumLoop = async () => {
+    if (!audioFile) return;
+    setAnalyzing(true);
+    setError(null);
+    
+    try {
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const arrayBuffer = await audioFile.arrayBuffer();
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+      
+      const channelData = audioBuffer.getChannelData(0);
+      const sampleRate = audioBuffer.sampleRate;
+      const duration = audioBuffer.duration;
+      
+      // Check if file is too long
+      if (duration > 8) {
+        setError('File is too long! Please use loops of 1-4 bars (typically under 8 seconds).');
+        setAnalyzing(false);
+        audioContext.close();
+        return;
+      }
+      
+      // Detect tempo with improved algorithm
+      const bpm = detectTempo(channelData, sampleRate);
+      
+      // Calculate number of beats in the loop
+      const beatsInLoop = Math.round((duration / 60) * bpm);
+      const bars = beatsInLoop / 4;
+      
+      // Only analyze if it's a reasonable loop length (1-4 bars)
+      if (beatsInLoop < 2 || beatsInLoop > 16) {
+        setError(`Detected ${beatsInLoop} beats - should be 4-16 beats. Try a different loop.`);
+        setAnalyzing(false);
+        audioContext.close();
+        return;
+      }
+      
+      // Use 16th note resolution
+      const steps = beatsInLoop * 4;
+      
+      // Detect drum hits
+      const onsets = detectOnsets(channelData, sampleRate, steps);
+      const kicks = classifyKicks(channelData, sampleRate, onsets, steps);
+      const snares = classifySnares(channelData, sampleRate, onsets, steps);
+      const hihats = classifyHiHats(channelData, sampleRate, onsets, steps);
+      
+      setDrumPattern({
+        bpm: Math.round(bpm),
+        beats: beatsInLoop,
+        bars: bars,
+        kicks: kicks.filter(k => k).length,
+        snares: snares.filter(s => s).length,
+        hihats: hihats.filter(h => h).length,
+        duration: duration.toFixed(2)
+      });
+      
+      // Generate Strudel code
+      const code = generateDrumCode(kicks, snares, hihats, bpm, beatsInLoop);
+      setStrudelCode(code);
+      
+      audioContext.close();
+    } catch (error) {
+      console.error('Analysis error:', error);
+      setError('Could not analyze audio. Make sure it\'s a valid drum loop file.');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  const detectTempo = (data, sampleRate) => {
+    // Improved onset-based tempo detection
+    const frameSize = 2048;
+    const hopSize = 512;
+    const energies = [];
+    
+    // Calculate spectral flux
+    for (let i = 0; i < data.length - frameSize; i += hopSize) {
+      let energy = 0;
+      for (let j = 0; j < frameSize; j++) {
+        energy += data[i + j] * data[i + j];
+      }
+      energies.push(Math.sqrt(energy / frameSize));
+    }
+    
+    // Find peaks
+    const threshold = Math.max(...energies) * 0.3;
+    const peaks = [];
+    for (let i = 2; i < energies.length - 2; i++) {
+      if (energies[i] > threshold && 
+          energies[i] > energies[i-1] && 
+          energies[i] > energies[i-2] &&
+          energies[i] > energies[i+1] &&
+          energies[i] > energies[i+2]) {
+        peaks.push(i * hopSize / sampleRate);
+      }
+    }
+    
+    if (peaks.length < 4) return 120;
+    
+    // Calculate inter-onset intervals
+    const intervals = [];
+    for (let i = 1; i < peaks.length; i++) {
+      const interval = peaks[i] - peaks[i-1];
+      if (interval > 0.15 && interval < 2) { // Filter unrealistic intervals
+        intervals.push(interval);
+      }
+    }
+    
+    if (intervals.length === 0) return 120;
+    
+    // Use median interval for robustness
+    intervals.sort((a, b) => a - b);
+    const medianInterval = intervals[Math.floor(intervals.length / 2)];
+    
+    // Convert to BPM
+    let bpm = 60 / medianInterval;
+    
+    // Snap to reasonable tempo range
+    while (bpm < 60) bpm *= 2;
+    while (bpm > 200) bpm /= 2;
+    
+    return bpm;
+  };
+
+  const detectOnsets = (data, sampleRate, totalSteps) => {
+    const stepSize = Math.floor(data.length / totalSteps);
+    const onsets = [];
+    
+    for (let step = 0; step < totalSteps; step++) {
+      const start = step * stepSize;
+      const end = Math.min(start + stepSize, data.length);
+      const windowSize = Math.min(512, end - start);
+      
+      // Calculate energy and spectral flux in this window
+      let energy = 0;
+      let peakValue = 0;
+      
+      for (let i = start; i < start + windowSize && i < end; i++) {
+        const val = Math.abs(data[i]);
+        energy += val * val;
+        peakValue = Math.max(peakValue, val);
+      }
+      
+      energy = Math.sqrt(energy / windowSize);
+      
+      // An onset is a combination of high energy and a sharp transient
+      const hasOnset = energy > 0.02 || peakValue > 0.1;
+      onsets.push({ step, energy, peakValue, hasOnset });
+    }
+    
+    return onsets;
+  };
+
+  const classifyKicks = (data, sampleRate, onsets, totalSteps) => {
+    const pattern = new Array(totalSteps).fill(false);
+    
+    onsets.forEach(onset => {
+      if (!onset.hasOnset) return;
+      
+      // Kicks are characterized by high energy and low frequency
+      // They typically have strong low-end energy
+      const isKick = onset.energy > 0.08 && onset.peakValue > 0.15;
+      
+      if (isKick) {
+        pattern[onset.step] = true;
+      }
+    });
+    
+    return pattern;
+  };
+
+  const classifySnares = (data, sampleRate, onsets, totalSteps) => {
+    const pattern = new Array(totalSteps).fill(false);
+    
+    onsets.forEach(onset => {
+      if (!onset.hasOnset) return;
+      
+      // Snares are mid-energy with sharp transients
+      const isSnare = onset.energy > 0.04 && 
+                      onset.energy < 0.12 && 
+                      onset.peakValue > 0.08;
+      
+      if (isSnare) {
+        pattern[onset.step] = true;
+      }
+    });
+    
+    return pattern;
+  };
+
+  const classifyHiHats = (data, sampleRate, onsets, totalSteps) => {
+    const pattern = new Array(totalSteps).fill(false);
+    
+    onsets.forEach(onset => {
+      if (!onset.hasOnset) return;
+      
+      // Hi-hats are lower energy, more consistent
+      const isHihat = onset.energy > 0.015 && 
+                      onset.energy < 0.06 && 
+                      onset.peakValue < 0.12;
+      
+      if (isHihat) {
+        pattern[onset.step] = true;
+      }
+    });
+    
+    return pattern;
+  };
+
+  const generateDrumCode = (kicks, snares, hihats, bpm, beats) => {
+    // Create mini-notation for each instrument
+    const kickStr = patternToString(kicks, 'bd');
+    const snareStr = patternToString(snares, 'sd');
+    const hihatStr = patternToString(hihats, 'hh');
+    
+    let code = `// ${beats} beat drum loop @ ${Math.round(bpm)} BPM\n\n`;
+    
+    code += `stack(\n`;
+    code += `  s("${kickStr}"),\n`;
+    code += `  s("${snareStr}"),\n`;
+    code += `  s("${hihatStr}")\n`;
+    code += `).cpm(${Math.round(bpm)})`;
+    
+    return code;
+  };
+
+  const patternToString = (pattern, sound) => {
+    return pattern.map(hit => hit ? sound : '~').join(' ');
+  };
+
+  const togglePlayback = () => {
+    if (!audioRef.current) return;
+    if (playing) {
+      audioRef.current.pause();
+      setPlaying(false);
+    } else {
+      audioRef.current.play();
+      setPlaying(true);
+    }
+  };
+
+  const copyCode = () => {
+    navigator.clipboard.writeText(strudelCode);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 p-4 sm:p-8">
+      <div className="max-w-5xl mx-auto">
+        {/* Header */}
+        <div className="text-center mb-8">
+          <div className="inline-flex items-center justify-center gap-3 mb-4 bg-purple-500/20 px-6 py-3 rounded-full border border-purple-500/30">
+            <Music2 className="w-8 h-8 text-purple-300" />
+            <h1 className="text-3xl font-bold text-white">Drum Loop → Strudel</h1>
+            <Zap className="w-6 h-6 text-yellow-400" />
+          </div>
+          <p className="text-purple-200 text-lg">Drop a short drum loop, get instant Strudel code</p>
+        </div>
+
+        {error && (
+          <div className="mb-6 bg-red-500/10 border border-red-500/30 rounded-xl p-4 flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+            <p className="text-red-200">{error}</p>
+          </div>
+        )}
+
+        <div className="grid lg:grid-cols-2 gap-6">
+          {/* Left: Upload & Preview */}
+          <div className="space-y-6">
+            <div className="bg-white/5 backdrop-blur-xl rounded-2xl p-6 border border-white/10">
+              <h2 className="text-xl font-bold text-white mb-4">1. Upload Drum Loop</h2>
+              
+              <label className="block">
+                <div className="border-2 border-dashed border-purple-400/50 rounded-xl p-8 text-center cursor-pointer hover:border-purple-400 hover:bg-white/5 transition-all duration-300">
+                  <Upload className="w-12 h-12 mx-auto mb-3 text-purple-400" />
+                  <p className="text-white font-semibold mb-2">Drop drum loop here</p>
+                  <p className="text-sm text-purple-300">or click to browse</p>
+                  <p className="text-xs text-purple-400 mt-2">MP3, WAV • 1-4 bars • Under 8 seconds</p>
+                  <input
+                    type="file"
+                    accept="audio/*"
+                    onChange={handleFileUpload}
+                    className="hidden"
+                  />
+                </div>
+              </label>
+            </div>
+
+            {audioFile && (
+              <>
+                <div className="bg-white/5 backdrop-blur-xl rounded-2xl p-6 border border-white/10">
+                  <h2 className="text-xl font-bold text-white mb-4">2. Preview & Analyze</h2>
+                  
+                  <div className="bg-slate-800/50 rounded-xl p-4 mb-4">
+                    <div className="flex items-center justify-between mb-3">
+                      <span className="text-white font-medium text-sm truncate flex-1 mr-4">
+                        {audioFile.name}
+                      </span>
+                      <button
+                        onClick={togglePlayback}
+                        className="flex-shrink-0 p-3 bg-purple-500 hover:bg-purple-600 rounded-lg transition-all"
+                      >
+                        {playing ? 
+                          <Square className="w-5 h-5 text-white" /> : 
+                          <Play className="w-5 h-5 text-white" />
+                        }
+                      </button>
+                    </div>
+                    <audio ref={audioRef} src={audioUrl} onEnded={() => setPlaying(false)} loop />
+                  </div>
+
+                  <button
+                    onClick={analyzeDrumLoop}
+                    disabled={analyzing}
+                    className="w-full bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white font-bold py-4 px-6 rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-purple-500/30"
+                  >
+                    {analyzing ? (
+                      <span className="flex items-center justify-center gap-2">
+                        <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                        Analyzing drum pattern...
+                      </span>
+                    ) : (
+                      <span className="flex items-center justify-center gap-2">
+                        <Zap className="w-5 h-5" />
+                        Analyze Drum Loop
+                      </span>
+                    )}
+                  </button>
+                </div>
+
+                {drumPattern && (
+                  <div className="bg-gradient-to-br from-purple-500/10 to-pink-500/10 backdrop-blur-xl rounded-2xl p-6 border border-purple-500/30">
+                    <h3 className="text-lg font-bold text-white mb-3">Detected Pattern</h3>
+                    <div className="grid grid-cols-2 gap-3 text-sm">
+                      <div className="bg-black/20 rounded-lg p-3">
+                        <div className="text-purple-300 text-xs mb-1">BPM</div>
+                        <div className="text-white font-bold text-2xl">{drumPattern.bpm}</div>
+                      </div>
+                      <div className="bg-black/20 rounded-lg p-3">
+                        <div className="text-purple-300 text-xs mb-1">Bars</div>
+                        <div className="text-white font-bold text-2xl">{drumPattern.bars}</div>
+                      </div>
+                      <div className="bg-black/20 rounded-lg p-3">
+                        <div className="text-purple-300 text-xs mb-1">Kicks</div>
+                        <div className="text-white font-bold text-xl">{drumPattern.kicks}</div>
+                      </div>
+                      <div className="bg-black/20 rounded-lg p-3">
+                        <div className="text-purple-300 text-xs mb-1">Snares</div>
+                        <div className="text-white font-bold text-xl">{drumPattern.snares}</div>
+                      </div>
+                      <div className="bg-black/20 rounded-lg p-3">
+                        <div className="text-purple-300 text-xs mb-1">Hi-hats</div>
+                        <div className="text-white font-bold text-xl">{drumPattern.hihats}</div>
+                      </div>
+                      <div className="bg-black/20 rounded-lg p-3">
+                        <div className="text-purple-300 text-xs mb-1">Duration</div>
+                        <div className="text-white font-bold text-xl">{drumPattern.duration}s</div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          {/* Right: Generated Code */}
+          <div className="bg-white/5 backdrop-blur-xl rounded-2xl p-6 border border-white/10">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-xl font-bold text-white">3. Strudel Code</h2>
+              {strudelCode && (
+                <button
+                  onClick={copyCode}
+                  className="flex items-center gap-2 px-4 py-2 bg-green-500 hover:bg-green-600 text-white font-semibold rounded-lg transition-all"
+                >
+                  {copied ? (
+                    <>
+                      <Check className="w-4 h-4" />
+                      Copied!
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-4 h-4" />
+                      Copy
+                    </>
+                  )}
+                </button>
+              )}
+            </div>
+
+            <div className="bg-slate-950 rounded-xl p-4 min-h-[500px] max-h-[600px] overflow-auto font-mono text-sm border border-slate-800">
+              {strudelCode ? (
+                <pre className="text-green-400 whitespace-pre-wrap">{strudelCode}</pre>
+              ) : (
+                <div className="flex flex-col items-center justify-center h-full text-center p-8">
+                  <Music2 className="w-16 h-16 text-slate-700 mb-4" />
+                  <p className="text-slate-600 text-base">
+                    Upload a drum loop and click<br />
+                    <span className="text-purple-400 font-semibold">"Analyze Drum Loop"</span><br />
+                    to generate Strudel code
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {strudelCode && (
+              <div className="mt-4 bg-blue-500/10 border border-blue-500/30 rounded-xl p-4">
+                <p className="text-blue-200 text-sm leading-relaxed">
+                  <strong className="text-white">Ready to play! 🎵</strong><br />
+                  Copy the code above and paste it into{' '}
+                  <a
+                    href="https://strudel.cc"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-blue-300 underline hover:text-white font-semibold"
+                  >
+                    strudel.cc
+                  </a>
+                  {' '}to hear your drum pattern live!
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Tips */}
+        <div className="mt-8 bg-white/5 backdrop-blur-xl rounded-2xl p-6 border border-white/10">
+          <h3 className="text-lg font-bold text-white mb-4">💡 Tips for Best Results</h3>
+          <div className="grid sm:grid-cols-3 gap-4 text-sm">
+            <div className="bg-purple-500/10 rounded-lg p-4 border border-purple-500/20">
+              <div className="text-purple-300 font-semibold mb-2">✓ Short Loops</div>
+              <p className="text-purple-200">1-4 bars (4-16 beats), under 8 seconds for best detection</p>
+            </div>
+            <div className="bg-purple-500/10 rounded-lg p-4 border border-purple-500/20">
+              <div className="text-purple-300 font-semibold mb-2">✓ Isolated Drums</div>
+              <p className="text-purple-200">Drums only - no melody, bass, or other instruments</p>
+            </div>
+            <div className="bg-purple-500/10 rounded-lg p-4 border border-purple-500/20">
+              <div className="text-purple-300 font-semibold mb-2">✓ Clean Audio</div>
+              <p className="text-purple-200">Clear, high-quality loops with consistent tempo work best</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
