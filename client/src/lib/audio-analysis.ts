@@ -41,8 +41,8 @@ export const analyzeDrumLoop = async (file: File): Promise<AnalysisResult> => {
       throw new Error(`Detected ${beatsInLoop} beats - should be 4-16 beats. Try a different loop.`);
     }
     
-    // Use 16th note resolution
-    const steps = beatsInLoop * 4;
+    // Use 32nd note resolution for better quantization
+    const steps = beatsInLoop * 8;
     
     // Detect drum hits
     const onsets = detectOnsets(channelData, sampleRate, steps);
@@ -227,17 +227,22 @@ const patternToString = (pattern: boolean[], sound: string) => {
 
 const generateDrumCode = (kicks: boolean[], snares: boolean[], hihats: boolean[], bpm: number, beats: number) => {
   // Create mini-notation for each instrument
+  // We use 32nd note resolution, so the patterns are quite dense
   const kickStr = patternToString(kicks, 'bd');
   const snareStr = patternToString(snares, 'sd');
   const hihatStr = patternToString(hihats, 'hh');
   
-  let code = `// ${beats} beat drum loop @ ${Math.round(bpm)} BPM\n\n`;
+  let code = `// ${beats} beat drum loop @ ${Math.round(bpm)} BPM\n`;
+  code += `// 32nd note quantization\n\n`;
   
+  // We use .slow(beats) because Strudel fits the whole pattern into 1 cycle by default.
+  // By slowing it down by the number of beats, we ensure 1 cycle = 1 beat,
+  // which matches the standard cpm(bpm) expectation.
   code += `stack(\n`;
   code += `  s("${kickStr}"),\n`;
   code += `  s("${snareStr}"),\n`;
   code += `  s("${hihatStr}")\n`;
-  code += `).cpm(${Math.round(bpm)})`;
+  code += `).slow(${beats}).cpm(${Math.round(bpm)})`;
   
   return code;
 };
