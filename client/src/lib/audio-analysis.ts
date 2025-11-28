@@ -44,11 +44,14 @@ export const analyzeDrumLoop = async (file: File): Promise<AnalysisResult> => {
     // Use 32nd note resolution for better quantization
     const steps = beatsInLoop * 8;
     
-    // Detect drum hits
-    const onsets = detectOnsets(channelData, sampleRate, steps);
-    const kicks = classifyKicks(channelData, sampleRate, onsets, steps);
-    const snares = classifySnares(channelData, sampleRate, onsets, steps);
-    const hihats = classifyHiHats(channelData, sampleRate, onsets, steps);
+    // Get frequency-specific energy profiles using OfflineAudioContext
+    // This is much more accurate than raw waveform analysis
+    const { lows, mids, highs } = await analyzeFrequencies(audioBuffer, steps);
+    
+    // Detect drum hits using frequency profiles
+    const kicks = classifyKicks(lows, mids, highs);
+    const snares = classifySnares(lows, mids, highs);
+    const hihats = classifyHiHats(lows, mids, highs);
     
     const drumPattern: DrumPattern = {
       bpm: Math.round(bpm),
@@ -68,6 +71,42 @@ export const analyzeDrumLoop = async (file: File): Promise<AnalysisResult> => {
     audioContext.close();
   }
 };
+
+async function analyzeFrequencies(buffer: AudioBuffer, steps: number) {
+  const offlineCtx = new OfflineAudioContext(1, buffer.length, buffer.sampleRate);
+  const source = offlineCtx.createBufferSource();
+  source.buffer = buffer;
+
+  // We need to process the audio 3 times with different filters
+  // Since OfflineAudioContext renders once, we'll do it sequentially or use 3 separate contexts.
+  // Actually, 8 seconds is short. Let's use 3 separate rendering passes for simplicity and clarity.
+  
+  const getFilteredData = async (type: BiquadFilterType, freq: number, q: number = 1) => {
+    const ctx = new OfflineAudioContext(1, buffer.length, buffer.sampleRate);
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    
+    const filter = ctx.createBiquadFilter();
+    filter.type = type;
+    filter.frequency.value = freq;
+    filter.Q.value = q;
+    
+    src.connect(filter);
+    filter.connect(ctx.destination);
+    src.start(0);
+    
+    const renderedBuffer = await ctx.startRendering();
+    return getStepEnergy(renderedBuffer.getChannelData(0), steps);
+  };
+
+  const [lows, mids, highs] = await Promise.all([
+    getFilteredData('lowpass', 150),        // Kick range
+    getFilteredData('bandpass', 400, 1),    // Snare body range
+    getFilteredData('highpass', 5000)       // Hi-hat range
+  ]);
+
+  return { lows, mids, highs };
+}
 
 const detectTempo = (data: Float32Array, sampleRate: number) => {
   // Improved onset-based tempo detection
@@ -125,100 +164,58 @@ const detectTempo = (data: Float32Array, sampleRate: number) => {
   return bpm;
 };
 
-const detectOnsets = (data: Float32Array, sampleRate: number, totalSteps: number) => {
-  const stepSize = Math.floor(data.length / totalSteps);
-  const onsets = [];
+function getStepEnergy(data: Float32Array, steps: number) {
+  const stepSize = Math.floor(data.length / steps);
+  const energies = [];
   
-  // Calculate global RMS to set dynamic thresholds
-  let sumSquares = 0;
+  // Calculate global max for normalization
+  let globalMax = 0;
   for (let i = 0; i < data.length; i++) {
-    sumSquares += data[i] * data[i];
+    const val = Math.abs(data[i]);
+    if (val > globalMax) globalMax = val;
   }
-  const globalRMS = Math.sqrt(sumSquares / data.length);
-  const dynamicThreshold = Math.max(0.02, globalRMS * 0.5);
 
-  for (let step = 0; step < totalSteps; step++) {
+  for (let step = 0; step < steps; step++) {
     const start = step * stepSize;
-    const end = Math.min(start + stepSize, data.length);
-    // Look slightly outside the window to catch swing/late hits? 
-    // No, strict quantization means we just look in the grid slot.
+    const end = start + stepSize;
+    let sum = 0;
+    let peak = 0;
     
-    let energy = 0;
-    let peakValue = 0;
-    
-    for (let i = start; i < end; i++) {
+    for (let i = start; i < end && i < data.length; i++) {
       const val = Math.abs(data[i]);
-      energy += val * val;
-      peakValue = Math.max(peakValue, val);
+      sum += val * val;
+      if (val > peak) peak = val;
     }
     
-    energy = Math.sqrt(energy / (end - start));
-    
-    // Stricter onset detection:
-    // 1. Energy must be significant relative to global level
-    // 2. Peak must be sharp
-    const hasOnset = energy > dynamicThreshold || peakValue > (globalRMS * 1.5);
-    
-    onsets.push({ step, energy, peakValue, hasOnset });
+    const rms = Math.sqrt(sum / (end - start));
+    // Normalize
+    energies.push({
+      rms: rms / (globalMax || 1), 
+      peak: peak / (globalMax || 1)
+    });
   }
-  
-  return onsets;
+  return energies;
+}
+
+const classifyKicks = (lows: any[], mids: any[], highs: any[]) => {
+  return lows.map((l, i) => {
+    // Strong low end, significantly more than highs
+    return l.rms > 0.15 && l.peak > 0.3 && l.rms > highs[i].rms * 1.5;
+  });
 };
 
-const classifyKicks = (data: Float32Array, sampleRate: number, onsets: any[], totalSteps: number) => {
-  const pattern = new Array(totalSteps).fill(false);
-  
-  onsets.forEach(onset => {
-    if (!onset.hasOnset) return;
-    
-    // Kicks are characterized by high energy and low frequency
-    // They typically have strong low-end energy
-    const isKick = onset.energy > 0.08 && onset.peakValue > 0.15;
-    
-    if (isKick) {
-      pattern[onset.step] = true;
-    }
+const classifySnares = (lows: any[], mids: any[], highs: any[]) => {
+  return mids.map((m, i) => {
+    // Mid range punch, but not too much low end (to avoid kicks)
+    return m.rms > 0.15 && m.peak > 0.25 && lows[i].rms < 0.4;
   });
-  
-  return pattern;
 };
 
-const classifySnares = (data: Float32Array, sampleRate: number, onsets: any[], totalSteps: number) => {
-  const pattern = new Array(totalSteps).fill(false);
-  
-  onsets.forEach(onset => {
-    if (!onset.hasOnset) return;
-    
-    // Snares are mid-energy with sharp transients
-    const isSnare = onset.energy > 0.04 && 
-                    onset.energy < 0.12 && 
-                    onset.peakValue > 0.08;
-    
-    if (isSnare) {
-      pattern[onset.step] = true;
-    }
+const classifyHiHats = (lows: any[], mids: any[], highs: any[]) => {
+  return highs.map((h, i) => {
+    // Pure high frequency energy
+    return h.rms > 0.05 && h.peak > 0.1 && lows[i].rms < 0.2 && mids[i].rms < 0.2;
   });
-  
-  return pattern;
-};
-
-const classifyHiHats = (data: Float32Array, sampleRate: number, onsets: any[], totalSteps: number) => {
-  const pattern = new Array(totalSteps).fill(false);
-  
-  onsets.forEach(onset => {
-    if (!onset.hasOnset) return;
-    
-    // Hi-hats are lower energy, more consistent
-    const isHihat = onset.energy > 0.015 && 
-                    onset.energy < 0.06 && 
-                    onset.peakValue < 0.12;
-    
-    if (isHihat) {
-      pattern[onset.step] = true;
-    }
-  });
-  
-  return pattern;
 };
 
 const patternToString = (pattern: boolean[], sound: string) => {
