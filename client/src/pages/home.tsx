@@ -59,14 +59,24 @@ export default function Home() {
     }
   };
 
-  const togglePlayback = () => {
+  const togglePlayback = async () => {
     if (!audioRef.current) return;
-    if (playing) {
-      audioRef.current.pause();
+    try {
+      if (playing) {
+        audioRef.current.pause();
+        setPlaying(false);
+      } else {
+        await audioRef.current.play();
+        setPlaying(true);
+      }
+    } catch (err) {
+      console.error("Playback failed", err);
       setPlaying(false);
-    } else {
-      audioRef.current.play();
-      setPlaying(true);
+      toast({
+        title: "Playback Failed",
+        description: "Could not play audio. Try a different file.",
+        variant: "destructive"
+      });
     }
   };
 
@@ -82,6 +92,10 @@ export default function Home() {
   };
 
   const reset = () => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+    }
     setAudioFile(null);
     setAudioUrl(null);
     setResult(null);
@@ -231,7 +245,11 @@ export default function Home() {
                         </button>
                       )}
                     </div>
-                    <audio ref={audioRef} src={audioUrl || ''} onEnded={() => setPlaying(false)} loop className="hidden" />
+                    <audio ref={audioRef} src={audioUrl || ''} onEnded={() => setPlaying(false)} loop className="hidden" onError={(e) => {
+                      console.error("Audio error", e);
+                      setPlaying(false);
+                      toast({ title: "Audio Error", description: "Could not load audio file.", variant: "destructive" });
+                    }} />
                   </div>
                 )}
               </div>
@@ -300,11 +318,7 @@ export default function Home() {
                       </button>
                     </div>
                     <div className="p-6 bg-black/60 overflow-x-auto">
-                      <pre className="font-mono text-sm leading-relaxed">
-                        <code dangerouslySetInnerHTML={{ 
-                          __html: highlightSyntax(result.code) 
-                        }} />
-                      </pre>
+                      <CodeBlock code={result.code} />
                     </div>
                   </div>
                   
@@ -337,11 +351,46 @@ function StatCard({ label, value, color = "text-white" }: { label: string, value
   );
 }
 
-// Simple syntax highlighter for Strudel/JavaScript
-function highlightSyntax(code: string) {
-  return code
-    .replace(/\/\/.*/g, '<span class="text-gray-500">$&</span>') // Comments
-    .replace(/stack|s|cpm/g, '<span class="text-primary font-bold">$&</span>') // Keywords
-    .replace(/"[^"]*"/g, '<span class="text-yellow-300">$&</span>') // Strings
-    .replace(/\b\d+\b/g, '<span class="text-cyan-400">$&</span>'); // Numbers
-}
+// Safer syntax highlighter component
+const CodeBlock = ({ code }: { code: string }) => {
+  return (
+    <pre className="font-mono text-sm leading-relaxed">
+      {code.split('\n').map((line, i) => (
+        <div key={i} className="min-h-[1.5em]">{processLine(line)}</div>
+      ))}
+    </pre>
+  );
+};
+
+const processLine = (line: string) => {
+  const commentIndex = line.indexOf('//');
+  if (commentIndex !== -1) {
+    const codePart = line.slice(0, commentIndex);
+    const commentPart = line.slice(commentIndex);
+    return (
+      <>
+        {processCode(codePart)}
+        <span className="text-gray-500">{commentPart}</span>
+      </>
+    );
+  }
+  return processCode(line);
+};
+
+const processCode = (text: string) => {
+  // Split by strings (double quotes)
+  const parts = text.split(/("[^"]*")/g);
+  return parts.map((part, i) => {
+    if (part.startsWith('"') && part.endsWith('"')) {
+      return <span key={i} className="text-yellow-300">{part}</span>;
+    }
+    // Process keywords and numbers in non-string parts
+    return <span key={i} dangerouslySetInnerHTML={{ __html: highlightKeywords(part) }} />;
+  });
+};
+
+const highlightKeywords = (text: string) => {
+  return text
+    .replace(/\b(stack|s|cpm)\b/g, '<span class="text-primary font-bold">$1</span>')
+    .replace(/\b(\d+)\b/g, '<span class="text-cyan-400">$1</span>');
+};
