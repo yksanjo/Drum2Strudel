@@ -1,5 +1,12 @@
 # Drum2Strudel
 
+Production-grade project scaffold focused on reliability, maintainability, and fast onboarding.
+
+[![CI](https://img.shields.io/github/actions/workflow/status/yksanjo/Drum2Strudel/ci.yml?branch=main&label=ci)](https://github.com/yksanjo/Drum2Strudel/actions)
+![License](https://img.shields.io/github/license/yksanjo/Drum2Strudel)
+![Last Commit](https://img.shields.io/github/last-commit/yksanjo/Drum2Strudel)
+![Repo Size](https://img.shields.io/github/repo-size/yksanjo/Drum2Strudel)
+
 ## Detailed Description
 
 Drum2Strudel is maintained as an industry-grade software project with production-ready engineering practices.  
